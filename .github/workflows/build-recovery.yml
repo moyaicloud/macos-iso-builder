@@ -37,102 +37,67 @@ jobs:
       - name: Preflight
         id: check
         run: |
-          # Third time's the charm
-          if [ "$GITHUB_RUN_ATTEMPT" -ge 3 ]; then
-            echo "_build=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          FOUND=false
+          # Informational only: surface an existing build from a recent fork, but never block the build.
+          VERSION_NORMALIZED=$(echo "${{ inputs.macos_version }}" | tr ' ' '_')
+          FOUND_RUN_URL=""
+          FOUND_ARTIFACT_NAME=""
+          PAST_15_DAYS=$(date -u -d '15 days ago' +%Y-%m-%dT%H:%M:%SZ)
           PAGE=1
-          while [ $PAGE -le 50 ]; do
-            DATA=$(curl -s \
+
+          while true; do
+            FORKS=$(curl -s \
               -H "Accept: application/vnd.github+json" \
               -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              "https://api.github.com/repos/LongQT-sea/macos-iso-builder/stargazers?per_page=100&page=${PAGE}")
-            echo "$DATA" | jq -e --arg user "$GITHUB_ACTOR" 'any(.[]; .login == $user)' > /dev/null && FOUND=true && break
-            [ "$(echo "$DATA" | grep -c '"login"')" -lt 100 ] && break
+              "https://api.github.com/repos/LongQT-sea/macos-iso-builder/forks?sort=newest&per_page=100&page=${PAGE}")
+            [ "$(echo "$FORKS" | jq 'length')" -eq 0 ] && break
+            RECENT=$(echo "$FORKS" | jq -r --arg date "$PAST_15_DAYS" \
+              '.[] | select(.created_at > $date) | .full_name')
+            [ -z "$RECENT" ] && break
+            while IFS= read -r fork_full_name; do
+              [ -z "$fork_full_name" ] && continue
+              RUN_ID=$(curl -s \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+                "https://api.github.com/repos/${fork_full_name}/actions/runs?status=success&per_page=10" \
+                | jq -r --arg date "$PAST_15_DAYS" '
+                  .workflow_runs[]
+                  | select(.name == "Build Recovery ISO image")
+                  | select(.created_at > $date)
+                  | .id' | head -1)
+              { [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; } && continue
+              MATCH=$(curl -s \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+                "https://api.github.com/repos/${fork_full_name}/actions/runs/${RUN_ID}/artifacts" \
+                | jq -r --arg v "macOS_${VERSION_NORMALIZED}_Recovery" '
+                  .artifacts[]
+                  | select(.name | startswith($v))
+                  | select(.expired == false)
+                  | .name' | head -1)
+              if [ -n "$MATCH" ] && [ "$MATCH" != "null" ]; then
+                FOUND_RUN_URL="https://github.com/${fork_full_name}/actions/runs/${RUN_ID}"
+                FOUND_ARTIFACT_NAME="$MATCH"
+                break 2
+              fi
+            done < <(echo "$RECENT")
             PAGE=$((PAGE + 1))
           done
 
-          if [ "$FOUND" = "false" ]; then
-            if [ "$GITHUB_RUN_ATTEMPT" -eq 1 ]; then
-              echo "## Before you build — check if someone already did it for you :point_down:" >> $GITHUB_STEP_SUMMARY
-              echo "" >> $GITHUB_STEP_SUMMARY
-              echo "Browse the **[Recent Forks List](https://github.com/LongQT-sea/macos-iso-builder)** — someone may have already built the macOS version you need." >> $GITHUB_STEP_SUMMARY
-              echo "" >> $GITHUB_STEP_SUMMARY
-              echo "> [!TIP]" >> $GITHUB_STEP_SUMMARY
-              echo "> Too lazy to browse? Click **Re-run all jobs** and I'll search recent forks for you automatically. :mag:" >> $GITHUB_STEP_SUMMARY
-              echo "> Otherwise, star :star: [LongQT-sea/macos-iso-builder](https://github.com/LongQT-sea/macos-iso-builder) to go straight to build next time." >> $GITHUB_STEP_SUMMARY
-              echo "> <br>![star](https://raw.githubusercontent.com/LongQT-sea/macos-iso-builder/main/.github/star.jpg)" >> $GITHUB_STEP_SUMMARY
-            else
-              VERSION_NORMALIZED=$(echo "${{ inputs.macos_version }}" | tr ' ' '_')
-              FOUND_RUN_URL=""
-              FOUND_ARTIFACT_NAME=""
-              PAST_15_DAYS=$(date -u -d '15 days ago' +%Y-%m-%dT%H:%M:%SZ)
-              PAGE=1
-
-              while true; do
-                FORKS=$(curl -s \
-                  -H "Accept: application/vnd.github+json" \
-                  -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-                  "https://api.github.com/repos/LongQT-sea/macos-iso-builder/forks?sort=newest&per_page=100&page=${PAGE}")
-                [ "$(echo "$FORKS" | jq 'length')" -eq 0 ] && break
-                RECENT=$(echo "$FORKS" | jq -r --arg date "$PAST_15_DAYS" \
-                  '.[] | select(.created_at > $date) | .full_name')
-                [ -z "$RECENT" ] && break
-                while IFS= read -r fork_full_name; do
-                  [ -z "$fork_full_name" ] && continue
-                  RUN_ID=$(curl -s \
-                    -H "Accept: application/vnd.github+json" \
-                    -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-                    "https://api.github.com/repos/${fork_full_name}/actions/runs?status=success&per_page=10" \
-                    | jq -r --arg date "$PAST_15_DAYS" '
-                      .workflow_runs[]
-                      | select(.name == "Build Recovery ISO image")
-                      | select(.created_at > $date)
-                      | .id' | head -1)
-                  [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ] && continue
-                  MATCH=$(curl -s \
-                    -H "Accept: application/vnd.github+json" \
-                    -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-                    "https://api.github.com/repos/${fork_full_name}/actions/runs/${RUN_ID}/artifacts" \
-                    | jq -r --arg v "macOS_${VERSION_NORMALIZED}_Recovery" '
-                      .artifacts[]
-                      | select(.name | startswith($v))
-                      | select(.expired == false)
-                      | .name' | head -1)
-                  if [ -n "$MATCH" ] && [ "$MATCH" != "null" ]; then
-                    FOUND_RUN_URL="https://github.com/${fork_full_name}/actions/runs/${RUN_ID}"
-                    FOUND_ARTIFACT_NAME="$MATCH"
-                    break 2
-                  fi
-                done < <(echo "$RECENT")
-                PAGE=$((PAGE + 1))
-              done
-
-              if [ -n "$FOUND_RUN_URL" ]; then
-                echo "## Found **${FOUND_ARTIFACT_NAME}** in a recent fork" >> $GITHUB_STEP_SUMMARY
-                echo "**[${FOUND_RUN_URL}](${FOUND_RUN_URL})**" >> $GITHUB_STEP_SUMMARY
-                echo "" >> $GITHUB_STEP_SUMMARY
-                echo "1. Open the link above" >> $GITHUB_STEP_SUMMARY
-                echo "2. Scroll down to the **Artifacts** section" >> $GITHUB_STEP_SUMMARY
-                echo "3. Click **${FOUND_ARTIFACT_NAME}** to download" >> $GITHUB_STEP_SUMMARY
-                echo "" >> $GITHUB_STEP_SUMMARY
-                echo "> [!TIP]" >> $GITHUB_STEP_SUMMARY
-                echo "> Want to build your own latest version? Star :star: [LongQT-sea/macos-iso-builder](https://github.com/LongQT-sea/macos-iso-builder) to skip this search and go straight to build next time." >> $GITHUB_STEP_SUMMARY
-                echo "> <br>![star](https://raw.githubusercontent.com/LongQT-sea/macos-iso-builder/main/.github/star.jpg)" >> $GITHUB_STEP_SUMMARY
-              else
-                echo "## No recent builds found in forks." >> $GITHUB_STEP_SUMMARY
-                echo "Star :star: [LongQT-sea/macos-iso-builder](https://github.com/LongQT-sea/macos-iso-builder) to skip this search and go straight to build next time." >> $GITHUB_STEP_SUMMARY
-                echo "<br>![star](https://raw.githubusercontent.com/LongQT-sea/macos-iso-builder/main/.github/star.jpg)" >> $GITHUB_STEP_SUMMARY
-                echo "_build=true" >> $GITHUB_OUTPUT
-              fi
-            fi
-            exit 0
+          if [ -n "$FOUND_RUN_URL" ]; then
+            {
+              echo "## Found **${FOUND_ARTIFACT_NAME}** in a recent fork"
+              echo "**[${FOUND_RUN_URL}](${FOUND_RUN_URL})**"
+              echo ""
+              echo "If you'd rather not wait for this build to finish, you can grab that one instead:"
+              echo "1. Open the link above"
+              echo "2. Scroll down to the **Artifacts** section"
+              echo "3. Click **${FOUND_ARTIFACT_NAME}** to download"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "## No recent builds found in forks — building it now." >> "$GITHUB_STEP_SUMMARY"
           fi
 
-          echo "_build=true" >> $GITHUB_OUTPUT
+          echo "_build=true" >> "$GITHUB_OUTPUT"
 
   build-recovery-iso:
     needs: preflight

@@ -8,7 +8,7 @@ This project has two parts:
 
 ## Before you start
 
-Check [Release page](https://github.com/LongQT-sea/mkmaciso/releases/latest) first - someone might've already built what you need. If not, see [How to use](#how-to-use) to build your own.
+Check [Release page](https://github.com/LongQT-sea/macos-iso-builder/releases/latest) first - someone might've already built what you need. If not, see [How to use](#how-to-use) to build your own.
 
 > [!Important]
 > GitHub-hosted runners are a free public resource — please use them responsibly.
@@ -66,12 +66,12 @@ Lion, Mountain Lion, Mavericks, Yosemite, El Capitan, Sierra, High Sierra, Mojav
 
 Quick run using Terminal.app (change `tahoe` to whatever you want):
 ```bash
-curl -s https://raw.githubusercontent.com/LongQT-sea/mkmaciso/main/mkmaciso | bash -s tahoe
+curl -s https://raw.githubusercontent.com/LongQT-sea/macos-iso-builder/main/mkmaciso | bash -s tahoe
 ```
 
 Or download the script first, then run with parameters:
 ```bash
-curl -O https://raw.githubusercontent.com/LongQT-sea/mkmaciso/main/mkmaciso
+curl -O https://raw.githubusercontent.com/LongQT-sea/macos-iso-builder/main/mkmaciso
 chmod +x mkmaciso
 ./mkmaciso --help
 ```
@@ -87,6 +87,13 @@ For VMs, just attach the ISO as a virtual CD drive. Proxmox users — if you wan
 For bootable USB drives, after you flash the DMG there will be leftover space on the drive. You can use that to create a FAT32 partition for your EFI folder if you need one.
 
 If you're using `dd` on Linux, triple-check your target device. `dd` doesn't ask for confirmation.
+
+## Troubleshooting
+
+- **Download keeps failing, or the build aborts with "smaller than 4GB":** usually a flaky network or an unlucky runner. Just try again — on GitHub Actions, re-run the workflow to land on a different runner; locally, re-run the script (it already retries each download for up to 30 minutes).
+- **"CRITICAL: low disk space":** the build needs roughly 20-40 GB free while it works. It refuses to start under 15 GB and warns under 40 GB. Free up space or pick an output location with more room.
+- **Apple Silicon quirks:** on Apple Silicon, `softwareupdate` can't fetch macOS older than the version your Mac shipped with, and `createinstallmedia` doesn't work for some older releases. The script automatically falls back to a direct-download / alternative-imaging path, but for the smoothest results build older versions on an Intel Mac.
+- **Permission prompts:** the script needs `sudo`. It asks for your password once and keeps the session alive for the duration of the build.
 
 ## Requirements for mkmaciso
 

@@ -77,6 +77,11 @@ if [ "$KERNEL_VERSION" -lt 13 ]; then
   exit 1
 fi
 
+# Verify the external tools every build path relies on are available
+for _tool in hdiutil diskutil curl sudo awk sed; do
+    command -v "$_tool" >/dev/null 2>&1 || { echo "${RED}Error: required tool '$_tool' not found${NC}"; exit 1; }
+done
+
 # Helper functions
 log_info() {
     echo -e "${GREEN}$(date +'%H:%M:%S') [INFO]${NC} $1"
@@ -88,6 +93,25 @@ log_warn() {
 
 log_error() {
     echo -e "${RED}$(date +'%H:%M:%S') [ERROR]${NC} $1"
+}
+
+# Abort if a required value is empty (prevents unsafe operations on blank input)
+require_nonempty() {
+    if [ -z "$1" ]; then
+        log_error "Internal error: ${2:-required value} is empty; aborting"
+        exit 1
+    fi
+    return 0
+}
+
+# Abort unless $1 is a whole-disk device node like /dev/disk3.
+# Guards destructive dd/diskutil/hdiutil operations against a blank or garbage ID.
+require_disk_id() {
+    if [[ ! "$1" =~ ^/dev/disk[0-9]+$ ]]; then
+        log_error "Internal error: invalid disk identifier '$1' (expected /dev/diskN); aborting to avoid touching the wrong device"
+        exit 1
+    fi
+    return 0
 }
 
 check_sudo_access() {
@@ -109,14 +133,14 @@ check_disk_space() {
     available=$(df -g . | awk 'NR==2 {print $4}')
     
     if [ "$available" -lt "$threshold_gb" ]; then
-        log_error "CRITICAL: Only ${available} GB available, (${required_gb} GB or more recommended"
+        log_error "CRITICAL: Only ${available} GB available (${required_gb} GB or more recommended)"
         log_error "Cannot continue due to low disk space"
         exit 1
     elif [ "$available" -lt "$required_gb" ]; then
         log_error "WARNING: Low disk space - ${available} GB available, ${required_gb} GB or more recommended"
         echo ""
         echo -ne "${YELLOW}[WARN]${NC} Continue? (Y/n - auto-yes in 10 seconds): "
-        read -t 10 answer || answer="y"
+        read -r -t 10 answer || answer="y"
         case "$answer" in
             [Nn]|[Nn][Oo])
                 log_error "Aborted"
@@ -644,7 +668,7 @@ download_mavericks() {
     # Create key_info file
     {
         hex_to_bin "$client_id"
-        hex_to_bin "$(echo $server_id | awk -F'~' '{print $2}')"
+        hex_to_bin "$(echo "$server_id" | awk -F'~' '{print $2}')"
         hex_to_bin "$rom"
         printf "%s" "${board_serial_number}${board_id}" | iconv -t utf-8 | openssl dgst -sha256 -binary
         printf '\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC'
@@ -904,7 +928,7 @@ download_modern_macos() {
     fi
     
     log_info "Fetching available macOS installers..."
-    softwareupdate --list-full-installers 2>/dev/null | grep "* Title:" | sed 's/^[[:space:]]*//' > "$WORK_DIR/installers.txt"
+    softwareupdate --list-full-installers 2>/dev/null | grep -F "* Title:" | sed 's/^[[:space:]]*//' > "$WORK_DIR/installers.txt"
     
     # Get latest installer version
     local selected_version_number
@@ -958,8 +982,9 @@ create_iso_dmg_10_7_10_8() {
     
     # Extract the exact version number and append it to the file name
     local exact_version_number
-    exact_version_number=$(defaults read "$WORK_DIR/InstallESD_mnt/System/Library/CoreServices/SystemVersion" ProductVersion)
-    FINAL_OUTPUT_PATH="${output_file%.${IMAGE_FORMAT}}_$exact_version_number.${IMAGE_FORMAT}"
+    exact_version_number=$(defaults read "$WORK_DIR/InstallESD_mnt/System/Library/CoreServices/SystemVersion" ProductVersion 2>/dev/null) || exact_version_number=""
+    [ -n "$exact_version_number" ] || exact_version_number="$version_num"
+    FINAL_OUTPUT_PATH="${output_file%".${IMAGE_FORMAT}"}_$exact_version_number.${IMAGE_FORMAT}"
 
     # Create final image
     if [ "$IMAGE_FORMAT" == "dmg" ]; then
@@ -1005,6 +1030,7 @@ create_iso_10_9_10_11() {
     
     # Mount the converted DMG
     DISK_ID=$(hdiutil attach -nobrowse -mountpoint "$WORK_DIR/BaseSystem_mnt" "$WORK_DIR/BaseSystem_converted.dmg" | grep -o '/dev/disk[0-9]*' | head -1)
+    require_disk_id "$DISK_ID"
     
     # Remove Packages symlink and copy actual Packages
     rm "$WORK_DIR/BaseSystem_mnt/System/Installation/Packages"
@@ -1022,8 +1048,9 @@ create_iso_10_9_10_11() {
 	
     # Extract the exact version number and append it to the file name
     local exact_version_number
-    exact_version_number=$(defaults read "$WORK_DIR/BaseSystem_mnt/System/Library/CoreServices/SystemVersion" ProductVersion)
-    FINAL_OUTPUT_PATH="${output_file%.iso}_$exact_version_number.iso"
+    exact_version_number=$(defaults read "$WORK_DIR/BaseSystem_mnt/System/Library/CoreServices/SystemVersion" ProductVersion 2>/dev/null) || exact_version_number=""
+    [ -n "$exact_version_number" ] || exact_version_number="$version_num"
+    FINAL_OUTPUT_PATH="${output_file%".iso"}_$exact_version_number.iso"
     
     # Unmount
     detach_disk "$WORK_DIR/InstallESD_mnt"
@@ -1054,10 +1081,12 @@ create_dmg_10_9_to_10_12_alt_method() {
     if [[ "$version_num" =~ ^(10\.9|10\.10)$ ]]; then
         # Attach BaseSystem.dmg
         BaseSystem_DISK_ID=$(hdiutil attach "$WORK_DIR/InstallESD_mnt/BaseSystem.dmg" -nomount | grep -o '/dev/disk[0-9]*' | head -1)
+        require_disk_id "$BaseSystem_DISK_ID"
         
     	# Create a DMG with GUID Partition Table and attach it
     	hdiutil create -quiet -ov -fs hfs+ -size 1400m "$WORK_DIR/installer_gpt.dmg"
         DISK_ID=$(hdiutil attach "$WORK_DIR/installer_gpt.dmg" -nomount | grep -o '/dev/disk[0-9]*' | head -1)
+        require_disk_id "$DISK_ID"
         
         # Write the bootable recovery partition to the first partition on the DMG image
         sudo dd if="${BaseSystem_DISK_ID}s2" of="${DISK_ID}s1" bs=1m && detach_disk "$BaseSystem_DISK_ID"
@@ -1084,11 +1113,12 @@ create_dmg_10_9_to_10_12_alt_method() {
         hdiutil convert -quiet "$WORK_DIR/InstallESD_mnt/BaseSystem.dmg" -format UDRW -o "$WORK_DIR/installer_gpt.dmg"
         
         # Increase size
-        sudo hdiutil resize -size ${dmg_size}g "$WORK_DIR/installer_gpt.dmg"
+        sudo hdiutil resize -size "${dmg_size}g" "$WORK_DIR/installer_gpt.dmg"
     fi
     
     # Mount DMG image and change volume name
     DISK_ID=$(hdiutil attach -nobrowse -mountpoint "$WORK_DIR/installer_mnt" "$WORK_DIR/installer_gpt.dmg" | grep -o '/dev/disk[0-9]*' | head -1)
+    require_disk_id "$DISK_ID"
     diskutil rename "${DISK_ID}s1" "$volume_name"
     
     # Remove Packages symlink and copy actual Packages
@@ -1101,8 +1131,9 @@ create_dmg_10_9_to_10_12_alt_method() {
     
     # Extract the exact version number and append it to the file name
     local exact_version_number
-    exact_version_number=$(defaults read "$WORK_DIR/installer_mnt/System/Library/CoreServices/SystemVersion" ProductVersion)
-    FINAL_OUTPUT_PATH="${output_file%.dmg}_$exact_version_number.dmg.img"
+    exact_version_number=$(defaults read "$WORK_DIR/installer_mnt/System/Library/CoreServices/SystemVersion" ProductVersion 2>/dev/null) || exact_version_number=""
+    [ -n "$exact_version_number" ] || exact_version_number="$version_num"
+    FINAL_OUTPUT_PATH="${output_file%".dmg"}_$exact_version_number.dmg.img"
     
 	sync && sleep 5
 	
@@ -1150,6 +1181,7 @@ create_iso_dmg_10_15_alt_method() {
     
     # Mount the converted DMG
     DISK_ID=$(hdiutil attach -nobrowse -mountpoint "$WORK_DIR/BaseSystem_mnt" "$WORK_DIR/BaseSystem_converted.dmg" | grep -o '/dev/disk[0-9]*' | head -1)
+    require_disk_id "$DISK_ID"
     diskutil rename "${DISK_ID}s1" "$volume_name"
     
     # Remove the stub installer app
@@ -1160,11 +1192,12 @@ create_iso_dmg_10_15_alt_method() {
 
     # Extract the exact version number and append it to the file name
     local exact_version_number
-    exact_version_number=$(defaults read "$WORK_DIR/BaseSystem_mnt/System/Library/CoreServices/SystemVersion" ProductVersion)
+    exact_version_number=$(defaults read "$WORK_DIR/BaseSystem_mnt/System/Library/CoreServices/SystemVersion" ProductVersion 2>/dev/null) || exact_version_number=""
+    [ -n "$exact_version_number" ] || exact_version_number="$version_num"
     if [ "$IMAGE_FORMAT" == "dmg" ]; then
-        FINAL_OUTPUT_PATH="${output_file%.dmg}_$exact_version_number.dmg.img"
+        FINAL_OUTPUT_PATH="${output_file%".dmg"}_$exact_version_number.dmg.img"
     else
-        FINAL_OUTPUT_PATH="${output_file%.iso}_$exact_version_number.iso"
+        FINAL_OUTPUT_PATH="${output_file%".iso"}_$exact_version_number.iso"
     fi
     
     # Unmount
@@ -1218,8 +1251,9 @@ create_iso_10_12_and_later() {
     echo ""
     
     # Create sparse image
-    hdiutil create -quiet -size 20g -volname "$(get_codename $version_num)_iso" -fs HFS+ -type SPARSE -attach "$WORK_DIR/installer.sparseimage"
-    DISK_ID=$(diskutil list | grep $(get_codename $version_num)_iso | head -1 | awk '{print $NF}' | sed 's/s[0-9]*$//')
+    hdiutil create -quiet -size 20g -volname "$(get_codename "$version_num")_iso" -fs HFS+ -type SPARSE -attach "$WORK_DIR/installer.sparseimage"
+    DISK_ID=$(diskutil list | grep "$(get_codename "$version_num")_iso" | head -1 | awk '{print $NF}' | sed 's/s[0-9]*$//')
+    require_disk_id "$DISK_ID"
     
     # Prepare createinstallmedia command
     local cmd
@@ -1240,8 +1274,9 @@ create_iso_10_12_and_later() {
     
     # Extract the exact version number and append it to the file name
     local exact_version_number
-    exact_version_number=$(defaults read "/Volumes/$(get_installer_app_name "$version_num")/System/Library/CoreServices/SystemVersion" ProductVersion)
-    FINAL_OUTPUT_PATH="${output_file%.iso}_$exact_version_number.iso"
+    exact_version_number=$(defaults read "/Volumes/$(get_installer_app_name "$version_num")/System/Library/CoreServices/SystemVersion" ProductVersion 2>/dev/null) || exact_version_number=""
+    [ -n "$exact_version_number" ] || exact_version_number="$version_num"
+    FINAL_OUTPUT_PATH="${output_file%".iso"}_$exact_version_number.iso"
     
     # Restore Info.plist
     if [ "$version_num" == "10.12" ]; then
@@ -1309,8 +1344,9 @@ create_dmg_10_10_and_later() {
     esac
     
     # Create DMG disk image
-    hdiutil create -quiet -size $dmg_size -volname "$(get_codename $version_num)_dmg" -fs HFS+ -type UDIF -attach "$WORK_DIR/installer.dmg"
-    DISK_ID=$(diskutil list | grep $(get_codename $version_num)_dmg | head -1 | awk '{print $NF}' | sed 's/s[0-9]*$//')
+    hdiutil create -quiet -size "$dmg_size" -volname "$(get_codename "$version_num")_dmg" -fs HFS+ -type UDIF -attach "$WORK_DIR/installer.dmg"
+    DISK_ID=$(diskutil list | grep "$(get_codename "$version_num")_dmg" | head -1 | awk '{print $NF}' | sed 's/s[0-9]*$//')
+    require_disk_id "$DISK_ID"
     
     # Prepare createinstallmedia command
     local cmd
@@ -1343,7 +1379,12 @@ create_dmg_10_10_and_later() {
     log_info "Starting DMG file size optimization..."
     
     # Check minimum size requirements
-    MIN_SIZE=$(diskutil resizeVolume ${DISK_ID}s2 limits | grep "Minimum (constrained by file usage)" | sed 's/.*(\([0-9]*\) Bytes)/\1/')
+    MIN_SIZE=$(diskutil resizeVolume "${DISK_ID}s2" limits | grep "Minimum (constrained by file usage)" | sed 's/.*(\([0-9]*\) Bytes)/\1/')
+    require_nonempty "$MIN_SIZE" "minimum partition size"
+    if [[ ! "$MIN_SIZE" =~ ^[0-9]+$ ]]; then
+        log_error "Internal error: could not determine minimum partition size (got '$MIN_SIZE'); aborting"
+        exit 1
+    fi
     
     # Add 50MB to $MIN_SIZE for macOS 10.10–10.11 because the installation fails when resized to the minimum size
     case "$version_num" in
@@ -1354,13 +1395,13 @@ create_dmg_10_10_and_later() {
     
     # Consolidate the installer data partition by shrinking the macOS installer partition to the minimum size.
     log_info "Shrinking macOS installer partition to minimum..."
-    diskutil resizeVolume ${DISK_ID}s2 "${MIN_SIZE}B" free free 0 >/dev/null 2>&1
+    diskutil resizeVolume "${DISK_ID}s2" "${MIN_SIZE}B" free free 0 >/dev/null 2>&1
     
     # Expand back to consolidate
     log_info "Expanding back to consolidate data ..."
     for attempt in $(seq 1 $RETRIES_COUNT); do
         log_info "Resize attempt $attempt of $RETRIES_COUNT..."
-        if diskutil resizeVolume ${DISK_ID}s2 0 >/dev/null 2>&1; then
+        if diskutil resizeVolume "${DISK_ID}s2" 0 >/dev/null 2>&1; then
             log_info "Partition resized successfully"
             break
         fi
@@ -1372,8 +1413,9 @@ create_dmg_10_10_and_later() {
     
     # Extract the exact version number and append it to the file name
     local exact_version_number
-    exact_version_number=$(defaults read "/Volumes/$(get_installer_app_name "$version_num")/System/Library/CoreServices/SystemVersion" ProductVersion)
-    FINAL_OUTPUT_PATH="${output_file%.dmg}_$exact_version_number.dmg.img"
+    exact_version_number=$(defaults read "/Volumes/$(get_installer_app_name "$version_num")/System/Library/CoreServices/SystemVersion" ProductVersion 2>/dev/null) || exact_version_number=""
+    [ -n "$exact_version_number" ] || exact_version_number="$version_num"
+    FINAL_OUTPUT_PATH="${output_file%".dmg"}_$exact_version_number.dmg.img"
     
     # Unmount
     detach_disk "$DISK_ID" && DISK_ID=""
@@ -1552,9 +1594,9 @@ main() {
 # Show usage if -h or --help is passed
 if [ "$1" == "--help" ] || [ "$1" == "-h" ]; then
     cat << 'EOF'
-╔══════════════════════════════════════════════════════════════════════════════╗"
-║ mkmaciso – the ultimate tool for creating macOS installer ISO and DMG images ║"
-╚══════════════════════════════════════════════════════════════════════════════╝"
+╔══════════════════════════════════════════════════════════════════════════════╗
+║ mkmaciso – the ultimate tool for creating macOS installer ISO and DMG images ║
+╚══════════════════════════════════════════════════════════════════════════════╝
 
 Usage:
   mkmaciso [VERSION] [FORMAT] [OUTPUT_PATH]

@@ -1,0 +1,46 @@
+name: Lint
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Bash syntax check
+        run: bash -n mkmaciso
+
+      - name: Ensure shellcheck is available
+        run: |
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y shellcheck
+          fi
+          shellcheck --version
+
+      - name: ShellCheck mkmaciso
+        run: |
+          shellcheck --shell=bash --severity=warning \
+            --exclude=SC2034,SC2015,SC2012,SC2024,SC2063 \
+            mkmaciso
+
+      - name: Install actionlint
+        run: |
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+
+      - name: Lint workflow YAML
+        # -shellcheck= disables actionlint's embedded shellcheck on run blocks
+        #   (mkmaciso is shellchecked above; the build/summary scripts have only
+        #   pre-existing style nits that are out of scope here).
+        # -ignore 'string should not be empty' allows the intentional empty ''
+        #   choice option used as a "select nothing" guard on the build inputs.
+        run: ./actionlint -color -shellcheck= -ignore 'string should not be empty'
